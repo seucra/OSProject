@@ -40,8 +40,15 @@ import math
 import queue
 
 # ── Constants ────────────────────────────────────────────────
-NUM_PHILOSOPHERS = 5
-NAMES = ["Aristotle", "Plato", "Socrates", "Descartes", "Kant"]
+DEFAULT_PHILOSOPHERS = 5
+MAX_PHILOSOPHERS = 20
+
+def get_name(idx):
+    return f"Philosopher {idx+1}"
+
+BASE_COLORS = ["#f87171", "#fb923c", "#facc15", "#4ade80", "#60a5fa", "#a78bfa", "#f472b6", "#fb7185", "#38bdf8", "#34d399", "#a3e635", "#fbbf24", "#f87171", "#c084fc", "#818cf8", "#f87171", "#fb923c", "#facc15", "#4ade80", "#60a5fa"]
+def get_color(idx):
+    return BASE_COLORS[idx % len(BASE_COLORS)]
 
 # Timing ranges (seconds)
 THINK_MIN, THINK_MAX = 0.5, 2.0
@@ -69,7 +76,7 @@ class PhilosopherState:
     """Shared mutable state for one philosopher (thread-safe reads via GIL)."""
     def __init__(self, idx: int):
         self.idx     = idx
-        self.name    = NAMES[idx]
+        self.name    = get_name(idx)
         self.state   = "thinking"   # "thinking" | "waiting" | "eating"
         self.meals   = 0
         self.total_wait = 0.0       # cumulative seconds spent waiting
@@ -93,15 +100,16 @@ class DiningSimulation:
         One of "resource" | "waiter" | "chandy".
     """
 
-    def __init__(self, algorithm: str = "resource"):
+    def __init__(self, algorithm: str = "resource", num_philosophers: int = DEFAULT_PHILOSOPHERS):
         self.algorithm   = algorithm
-        self.forks       = [threading.Lock() for _ in range(NUM_PHILOSOPHERS)]
-        self.phil_states = [PhilosopherState(i) for i in range(NUM_PHILOSOPHERS)]
+        self.num_philosophers = num_philosophers
+        self.forks       = [threading.Lock() for _ in range(num_philosophers)]
+        self.phil_states = [PhilosopherState(i) for i in range(num_philosophers)]
         self.stop_event  = threading.Event()
         self.log_queue   = queue.Queue(maxsize=200)
 
         # Waiter semaphore — allows at most N-1 philosophers to compete at once
-        self.waiter_sem  = threading.Semaphore(NUM_PHILOSOPHERS - 1)
+        self.waiter_sem  = threading.Semaphore(max(1, num_philosophers - 1))
 
     # ── Logging ───────────────────────────────────────────────
     def log(self, msg: str):
@@ -143,7 +151,7 @@ class DiningSimulation:
         We pick  lo = min(left, right),  hi = max(left, right).
         """
         ps = self.phil_states[idx]
-        left  = (idx - 1) % NUM_PHILOSOPHERS
+        left  = (idx - 1) % self.num_philosophers
         right = idx
         lo, hi = min(left, right), max(left, right)
 
@@ -175,7 +183,7 @@ class DiningSimulation:
         to pick up forks at the same time, preventing deadlock.
         """
         ps = self.phil_states[idx]
-        left  = (idx - 1) % NUM_PHILOSOPHERS
+        left  = (idx - 1) % self.num_philosophers
         right = idx
 
         ps.state = "waiting"
@@ -215,7 +223,7 @@ class DiningSimulation:
         version approximates the fairness using a shared condition.)
         """
         ps = self.phil_states[idx]
-        left  = (idx - 1) % NUM_PHILOSOPHERS
+        left  = (idx - 1) % self.num_philosophers
         right = idx
 
         ps.state = "waiting"
@@ -261,12 +269,12 @@ class DiningSimulation:
         """Spawn one daemon thread per philosopher."""
         self.stop_event.clear()
         self._threads = []
-        for i in range(NUM_PHILOSOPHERS):
+        for i in range(self.num_philosophers):
             t = threading.Thread(
                 target=self.run_philosopher,
                 args=(i,),
                 daemon=True,
-                name=f"Phil-{NAMES[i]}"
+                name=f"Phil-{get_name(i)}"
             )
             t.start()
             self._threads.append(t)
@@ -315,6 +323,7 @@ class DiningGUI:
         self.paused   = False
         self._speed   = 3           # 1–5
         self._after_id = None
+        self.num_philosophers = DEFAULT_PHILOSOPHERS
 
         self._build_ui()
         self._draw_idle()
@@ -323,8 +332,23 @@ class DiningGUI:
     def _build_ui(self):
         PAD = {"padx": 10, "pady": 6}
 
+        # Create main 2-column container
+        main_container = tk.Frame(self.root, bg="#111110")
+        main_container.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Configure columns for 7:3 ratio
+        main_container.columnconfigure(0, weight=7)
+        main_container.columnconfigure(1, weight=3)
+        main_container.rowconfigure(0, weight=1)
+
+        left_col = tk.Frame(main_container, bg="#111110")
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+
+        right_col = tk.Frame(main_container, bg="#111110")
+        right_col.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+
         # ── Top bar ──
-        top = tk.Frame(self.root, bg="#111110")
+        top = tk.Frame(left_col, bg="#111110")
         top.pack(fill="x", **PAD)
 
         tk.Label(top, text="Dining Philosophers Problem",
@@ -350,13 +374,13 @@ class DiningGUI:
 
         # ── Canvas ──
         self.canvas = tk.Canvas(
-            self.root, width=self.CANVAS_SIZE, height=self.CANVAS_SIZE,
+            left_col, width=self.CANVAS_SIZE, height=self.CANVAS_SIZE,
             bg=CANVAS_BG, highlightthickness=0
         )
         self.canvas.pack(padx=10)
 
         # ── Stats row ──
-        stats_frame = tk.Frame(self.root, bg="#111110")
+        stats_frame = tk.Frame(left_col, bg="#111110")
         stats_frame.pack(fill="x", padx=10, pady=(4, 0))
         self.stat_labels = {}
         for key, label, color in [
@@ -364,6 +388,8 @@ class DiningGUI:
             ("waiting",  "Waiting",     "#f59e0b"),
             ("thinking", "Thinking",    "#9ca3af"),
             ("meals",    "Total meals", "#e5e4dc"),
+            ("total_wait", "Wait Time", "#f472b6"),
+            ("avg_wait", "Wait/Meal", "#a78bfa"),
         ]:
             box = tk.Frame(stats_frame, bg="#1e1e1c",
                            bd=0, relief="flat", padx=14, pady=6)
@@ -376,18 +402,32 @@ class DiningGUI:
             self.stat_labels[key] = val_lbl
 
         # ── Per-philosopher state table ──
-        table_frame = tk.Frame(self.root, bg="#111110")
-        table_frame.pack(fill="x", padx=10, pady=(8, 0))
+        table_container = tk.Frame(left_col, bg="#111110")
+        table_container.pack(fill="both", expand=True, padx=10, pady=(8, 0))
+        
+        table_scroll = tk.Scrollbar(table_container, orient="vertical")
+        table_scroll.pack(side="right", fill="y")
+        
+        self.table_canvas = tk.Canvas(table_container, bg="#111110", highlightthickness=0, yscrollcommand=table_scroll.set)
+        self.table_canvas.pack(side="left", fill="both", expand=True)
+        table_scroll.config(command=self.table_canvas.yview)
+        
+        self.table_frame = tk.Frame(self.table_canvas, bg="#111110")
+        self.table_window_id = self.table_canvas.create_window((0, 0), window=self.table_frame, anchor="nw")
+        
+        self.table_frame.bind("<Configure>", lambda e: self.table_canvas.configure(scrollregion=self.table_canvas.bbox("all")))
+        self.table_canvas.bind("<Configure>", lambda e: self.table_canvas.itemconfig(self.table_window_id, width=e.width))
+
         self._phil_rows = []
         headers = ["Philosopher", "State", "Meals", "Wait (s)"]
         for c, h in enumerate(headers):
-            tk.Label(table_frame, text=h, fg="#6b6b68",
+            tk.Label(self.table_frame, text=h, fg="#6b6b68",
                      bg="#111110", font=("Helvetica", 10, "bold"),
                      width=14, anchor="w").grid(row=0, column=c, padx=4)
-        for i in range(NUM_PHILOSOPHERS):
+        for i in range(self.num_philosophers):
             row_labels = []
             for c in range(4):
-                lbl = tk.Label(table_frame, text="—", fg="#e5e4dc",
+                lbl = tk.Label(self.table_frame, text="—", fg="#e5e4dc",
                                bg="#111110", font=("Helvetica", 10),
                                width=14, anchor="w")
                 lbl.grid(row=i+1, column=c, padx=4, pady=1)
@@ -395,29 +435,8 @@ class DiningGUI:
             self._phil_rows.append(row_labels)
         self._update_phil_table_static()
 
-        # ── Log panel ──
-        log_frame = tk.Frame(self.root, bg="#111110")
-        log_frame.pack(fill="both", expand=True, padx=10, pady=(8, 0))
-        tk.Label(log_frame, text="Event Log", fg="#6b6b68",
-                 bg="#111110", font=("Helvetica", 10, "bold"),
-                 anchor="w").pack(fill="x")
-        self.log_text = tk.Text(
-            log_frame, height=7, bg="#0d0d0c", fg="#9ca3af",
-            font=("Courier", 10), state="disabled",
-            relief="flat", bd=0, padx=6, pady=4,
-            wrap="word"
-        )
-        scroll = tk.Scrollbar(log_frame, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.log_text.pack(fill="both", expand=True)
-        # Colour tags for log
-        self.log_text.tag_config("eat",  foreground="#22c55e")
-        self.log_text.tag_config("wait", foreground="#f59e0b")
-        self.log_text.tag_config("info", foreground="#9ca3af")
-
         # ── Bottom controls ──
-        btn_frame = tk.Frame(self.root, bg="#111110")
+        btn_frame = tk.Frame(left_col, bg="#111110")
         btn_frame.pack(fill="x", padx=10, pady=10)
 
         self.btn_start = tk.Button(
@@ -447,18 +466,73 @@ class DiningGUI:
         self.speed_var = tk.IntVar(value=3)
         tk.Scale(
             btn_frame, variable=self.speed_var, from_=1, to=5,
-            orient="horizontal", length=90, bg="#111110", fg="#9ca3af",
+            orient="horizontal", length=60, bg="#111110", fg="#9ca3af",
             highlightthickness=0, troughcolor="#2d2d2b",
             showvalue=True, font=("Helvetica", 9)
         ).pack(side="right", padx=4)
 
+        # Philosophers slider
+        tk.Label(btn_frame, text="2-20 philosophers:", fg="#9ca3af",
+                 bg="#111110", font=("Helvetica", 10)).pack(side="right", padx=(0, 4))
+        self.num_phil_var = tk.IntVar(value=DEFAULT_PHILOSOPHERS)
+        tk.Scale(
+            btn_frame, variable=self.num_phil_var, from_=2, to=MAX_PHILOSOPHERS,
+            orient="horizontal", length=90, bg="#111110", fg="#9ca3af",
+            highlightthickness=0, troughcolor="#2d2d2b",
+            showvalue=True, font=("Helvetica", 9),
+            command=self._on_num_phil_change
+        ).pack(side="right", padx=4)
+
+        # ── Log panel (Right Column) ──
+        log_frame = tk.Frame(right_col, bg="#111110")
+        log_frame.pack(fill="both", expand=True)
+        tk.Label(log_frame, text="Event Log", fg="#6b6b68",
+                 bg="#111110", font=("Helvetica", 10, "bold"),
+                 anchor="w").pack(fill="x")
+        self.log_text = tk.Text(
+            log_frame, bg="#0d0d0c", fg="#9ca3af",
+            font=("Courier", 10), state="disabled",
+            relief="flat", bd=0, padx=6, pady=4,
+            wrap="word"
+        )
+        scroll = tk.Scrollbar(log_frame, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.log_text.pack(fill="both", expand=True)
+        # Colour tags for log
+        self.log_text.tag_config("eat",  foreground="#22c55e")
+        self.log_text.tag_config("wait", foreground="#f59e0b")
+        self.log_text.tag_config("info", foreground="#9ca3af")
+
     # ── Initial static table fill ─────────────────────────────
     def _update_phil_table_static(self):
         for i, row in enumerate(self._phil_rows):
-            row[0].config(text=NAMES[i], fg=COLORS[i])
+            row[0].config(text=get_name(i), fg=get_color(i))
             row[1].config(text="thinking", fg=STATE_COLOR["thinking"])
             row[2].config(text="0")
             row[3].config(text="0.00")
+
+    def _on_num_phil_change(self, val):
+        if not self.running:
+            self.num_philosophers = int(val)
+            self._update_table_ui()
+            self._draw_idle()
+
+    def _update_table_ui(self):
+        for row in self._phil_rows:
+            for lbl in row:
+                lbl.destroy()
+        self._phil_rows = []
+        for i in range(self.num_philosophers):
+            row_labels = []
+            for c in range(4):
+                lbl = tk.Label(self.table_frame, text="—", fg="#e5e4dc",
+                               bg="#111110", font=("Helvetica", 10),
+                               width=14, anchor="w")
+                lbl.grid(row=i+1, column=c, padx=4, pady=1)
+                row_labels.append(lbl)
+            self._phil_rows.append(row_labels)
+        self._update_phil_table_static()
 
     # ── Button handlers ───────────────────────────────────────
     def _on_start(self):
@@ -466,7 +540,7 @@ class DiningGUI:
             return
         if not self.running:
             algo = self.algo_var.get()
-            self.sim = DiningSimulation(algorithm=algo)
+            self.sim = DiningSimulation(algorithm=algo, num_philosophers=self.num_philosophers)
             self.sim.start()
             self._append_log(f"Started — algorithm: {algo}", "info")
         self.running = True
@@ -503,6 +577,7 @@ class DiningGUI:
         self.btn_start.config(state="normal")
         self.btn_pause.config(state="disabled", text="⏸  Pause")
         self.algo_menu.config(state="readonly")
+        self.num_phil_var.set(self.num_philosophers)
         self._update_stats_idle()
         self._update_phil_table_static()
         self._draw_idle()
@@ -510,7 +585,7 @@ class DiningGUI:
 
     # ── Polling loop ──────────────────────────────────────────
     def _schedule_poll(self):
-        interval_ms = [200, 150, 100, 70, 40][self.speed_var.get() - 1]
+        interval_ms = [2000, 1000, 500, 100, 25][self.speed_var.get() - 1]
         self._after_id = self.root.after(interval_ms, self._poll)
 
     def _poll(self):
@@ -544,11 +619,11 @@ class DiningGUI:
         )
         c.create_text(self.CX, self.CY-10, text="Round Table",
                       fill="#555553", font=("Helvetica", 11))
-        c.create_text(self.CX, self.CY+10, text=f"{NUM_PHILOSOPHERS} Philosophers",
+        c.create_text(self.CX, self.CY+10, text=f"{self.num_philosophers} Philosophers",
                       fill="#444442", font=("Helvetica", 10))
         # Forks
-        for i in range(NUM_PHILOSOPHERS):
-            ang = (i / NUM_PHILOSOPHERS) * 2 * math.pi - math.pi/2 + math.pi/NUM_PHILOSOPHERS
+        for i in range(self.num_philosophers):
+            ang = (i / self.num_philosophers) * 2 * math.pi - math.pi/2 + math.pi/self.num_philosophers
             fx  = self.CX + self.R_FORK * math.cos(ang)
             fy  = self.CY + self.R_FORK * math.sin(ang)
             r = 9
@@ -557,18 +632,18 @@ class DiningGUI:
             c.create_text(fx, fy, text=f"F{i+1}",
                           fill="#e5e4dc", font=("Helvetica", 8, "bold"))
         # Philosophers
-        for i in range(NUM_PHILOSOPHERS):
-            ang = (i / NUM_PHILOSOPHERS) * 2 * math.pi - math.pi/2
+        for i in range(self.num_philosophers):
+            ang = (i / self.num_philosophers) * 2 * math.pi - math.pi/2
             px  = self.CX + self.R_PHIL * math.cos(ang)
             py  = self.CY + self.R_PHIL * math.sin(ang)
             r   = 22
             c.create_oval(px-r, py-r, px+r, py+r,
-                          fill=COLORS[i], outline=STATE_COLOR["thinking"], width=2)
-            c.create_text(px, py, text=NAMES[i][0],
+                          fill=get_color(i), outline=STATE_COLOR["thinking"], width=2)
+            c.create_text(px, py, text=get_name(i)[0],
                           fill="#fff", font=("Helvetica", 11, "bold"))
             lx = self.CX + (self.R_PHIL + 34) * math.cos(ang)
             ly = self.CY + (self.R_PHIL + 34) * math.sin(ang)
-            c.create_text(lx, ly, text=NAMES[i][:5],
+            c.create_text(lx, ly, text=f"P{i+1}",
                           fill="#9ca3af", font=("Helvetica", 10))
 
     def _draw_state(self):
@@ -579,11 +654,11 @@ class DiningGUI:
         c.delete("all")
 
         # Determine fork holder
-        fork_holder = [-1] * NUM_PHILOSOPHERS  # fork i held by whom
+        fork_holder = [-1] * self.num_philosophers  # fork i held by whom
         # Heuristic: if a philosopher is eating, they hold their two forks
         for ps in self.sim.phil_states:
             if ps.state == "eating":
-                left  = (ps.idx - 1) % NUM_PHILOSOPHERS
+                left  = (ps.idx - 1) % self.num_philosophers
                 right = ps.idx
                 fork_holder[left]  = ps.idx
                 fork_holder[right] = ps.idx
@@ -597,12 +672,12 @@ class DiningGUI:
         c.create_text(self.CX, self.CY-10, text="Round Table",
                       fill="#555553", font=("Helvetica", 11))
         c.create_text(self.CX, self.CY+10,
-                      text=f"{NUM_PHILOSOPHERS} Philosophers",
+                      text=f"{self.num_philosophers} Philosophers",
                       fill="#444442", font=("Helvetica", 10))
 
         # Forks
-        for i in range(NUM_PHILOSOPHERS):
-            ang  = (i / NUM_PHILOSOPHERS) * 2*math.pi - math.pi/2 + math.pi/NUM_PHILOSOPHERS
+        for i in range(self.num_philosophers):
+            ang  = (i / self.num_philosophers) * 2*math.pi - math.pi/2 + math.pi/self.num_philosophers
             fx   = self.CX + self.R_FORK * math.cos(ang)
             fy   = self.CY + self.R_FORK * math.sin(ang)
             r    = 9
@@ -614,7 +689,7 @@ class DiningGUI:
 
         # Philosophers
         for ps in self.sim.phil_states:
-            ang = (ps.idx / NUM_PHILOSOPHERS) * 2*math.pi - math.pi/2
+            ang = (ps.idx / self.num_philosophers) * 2*math.pi - math.pi/2
             px  = self.CX + self.R_PHIL * math.cos(ang)
             py  = self.CY + self.R_PHIL * math.sin(ang)
             r   = 22
@@ -626,8 +701,8 @@ class DiningGUI:
                               fill="", outline=ring, width=2, dash=(4, 3))
 
             c.create_oval(px-r, py-r, px+r, py+r,
-                          fill=COLORS[ps.idx], outline=ring, width=3)
-            c.create_text(px, py, text=NAMES[ps.idx][0],
+                          fill=get_color(ps.idx), outline=ring, width=3)
+            c.create_text(px, py, text=get_name(ps.idx)[0],
                           fill="#fff", font=("Helvetica", 11, "bold"))
 
             # State indicator dot (top-right of circle)
@@ -638,7 +713,7 @@ class DiningGUI:
             # Labels
             lx = self.CX + (self.R_PHIL + 34) * math.cos(ang)
             ly = self.CY + (self.R_PHIL + 34) * math.sin(ang)
-            c.create_text(lx, ly, text=NAMES[ps.idx][:5],
+            c.create_text(lx, ly, text=f"P{ps.idx+1}",
                           fill="#d1d0c6", font=("Helvetica", 10))
             c.create_text(lx, ly+14, text=f"×{ps.meals}",
                           fill=ring, font=("Helvetica", 9, "bold"))
@@ -647,12 +722,21 @@ class DiningGUI:
     def _update_stats(self):
         if self.sim is None:
             return
-        counts = {"eating": 0, "waiting": 0, "thinking": 0, "meals": 0}
+        counts = {"eating": 0, "waiting": 0, "thinking": 0, "meals": 0, "total_wait": 0.0}
         for ps in self.sim.phil_states:
             counts[ps.state] += 1
             counts["meals"]  += ps.meals
+            counts["total_wait"] += ps.total_wait
+        if counts["meals"] > 0:
+            counts["avg_wait"] = counts["total_wait"] / counts["meals"]
+        else:
+            counts["avg_wait"] = 0.0
+
         for key, lbl in self.stat_labels.items():
-            lbl.config(text=str(counts[key]))
+            if key in ["total_wait", "avg_wait"]:
+                lbl.config(text=f"{counts[key]:.1f}s")
+            else:
+                lbl.config(text=str(counts[key]))
 
     def _update_stats_idle(self):
         for lbl in self.stat_labels.values():
@@ -663,7 +747,7 @@ class DiningGUI:
             return
         for ps in self.sim.phil_states:
             row = self._phil_rows[ps.idx]
-            row[0].config(text=NAMES[ps.idx], fg=COLORS[ps.idx])
+            row[0].config(text=get_name(ps.idx), fg=get_color(ps.idx))
             row[1].config(text=ps.state, fg=STATE_COLOR[ps.state])
             row[2].config(text=str(ps.meals))
             row[3].config(text=f"{ps.total_wait:.1f}s")
